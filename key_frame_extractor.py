@@ -20,6 +20,15 @@ def format_timestamp(frame_index, fps):
     milliseconds = int((total_seconds % 1) * 1000)
     return f"{hours:02d}:{minutes:02d}:{seconds:02d}.{milliseconds:03d}"
 
+def get_seconds(time_str):
+    """Converts '00:00:42.159' to 42.159 float seconds"""
+    try:
+        # Splitting HH:MM:SS.mmm
+        h, m, s = time_str.split(':')
+        return int(h) * 3600 + int(m) * 60 + float(s)
+    except Exception:
+        return 0.0
+
 def get_bhattacharyya_distance(hist1, hist2):
     return cv2.compareHist(hist1, hist2, cv2.HISTCMP_BHATTACHARYYA)
 

@@ -5,7 +5,10 @@ import streamlit as st
 class VideoDB:
     def __init__(self, collection_name="video_scenes"):
         # Use ":memory:" for testing, or a local path for persistence
-        self.client = QdrantClient() 
+        self.client = QdrantClient(
+            url="https://daefea10-05bc-4a41-8e76-6157f720d8a0.europe-west3-0.gcp.cloud.qdrant.io:6333",
+            api_key="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhY2Nlc3MiOiJtIn0.O0QvvMbq25gF-UZJLVnRhH1Jy0N8ELuwstv6J5IchPM",
+        ) 
         self.collection_name = collection_name
         self._setup_collection()
 

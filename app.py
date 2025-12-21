@@ -6,7 +6,7 @@ import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 
 # Import your custom modules
-from key_frame_extractor import extract_distinct_frames, extract_deep_features, refine_key_frames
+from key_frame_extractor import extract_distinct_frames, extract_deep_features, refine_key_frames, get_seconds
 from captions_generator import get_image_caption
 from vector_embeddings import get_text_embedding
 from store_embeddings import VideoDB
@@ -95,7 +95,10 @@ st.title("Video Intelligence Dashboard")
 
 if st.session_state.active_video:
     st.markdown('<div class="ui-frame">', unsafe_allow_html=True)
-    st.video(st.session_state.active_video)
+    current_start = st.session_state.get("video_start_time", 0.0)
+    st.video(st.session_state.active_video, 
+             start_time=float(current_start),
+             )
     st.markdown('</div>', unsafe_allow_html=True)
 else:
     st.info("Upload and process a video from the sidebar to start chatting.")
@@ -119,26 +122,34 @@ if prompt := st.chat_input("Ask about a scene in the video..."):
     with st.chat_message("assistant"):
         query_vec = get_text_embedding(prompt)
         results = db.search_video(query_vec, limit=1)
-        print(results)
-        if results:
-            # hit = results[0]
-            # frame_id = hit.payload['frame_index']
-            # timestamp = hit.payload['timestamp']
-            # caption = hit.payload['caption']
+        print(results.points[0])
+        if results.points[0]:
+            hit = results.points[0]
+            frame_id = hit.payload['frame_index']
+            timestamp_str = hit.payload['timestamp']
+            caption = hit.payload['caption']
 
-            # res_text = f"Found at {timestamp}: {caption}"
-            res_text = f"Found at {results}"
+            start_seconds = get_seconds(timestamp_str)
+            print(type(start_seconds))
+
+            res_text = f"Found at {timestamp_str}: {caption}"
             st.write(res_text)
 
-            # Retrieve image from our local cache using the ID from Qdrant
-            # if "image_cache" in st.session_state and frame_id in st.session_state.image_cache:
-            #     matched_img = st.session_state.image_cache[frame_id]
-            #     st.image(matched_img)
+
+            # ADD THE JUMP BUTTON HERE
+            if st.button(f"Play from {timestamp_str}"):
+                st.session_state.video_start_time = start_seconds
+                st.rerun()
+
+            #Retrieve image from our local cache using the ID from Qdrant
+            if "image_cache" in st.session_state and frame_id in st.session_state.image_cache:
+                matched_img = st.session_state.image_cache[frame_id]
+                st.image(matched_img)
                 
-            #     st.session_state.messages.append({
-            #         "role": "assistant", "content": res_text, 
-            #         "image": matched_img, "img_caption": f"Scene at {timestamp}"
-            #     })
+                st.session_state.messages.append({
+                    "role": "assistant", "content": res_text, 
+                    "image": matched_img, "img_caption": f"Scene at {timestamp_str}"
+                })
         else:
             res_text = "I couldn't find a matching scene in the database."
             st.write(res_text)
