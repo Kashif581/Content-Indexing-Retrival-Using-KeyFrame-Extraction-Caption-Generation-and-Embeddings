@@ -6,7 +6,7 @@ import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 
 # Import your custom modules
-from key_frame_extractor import extract_distinct_frames, extract_deep_features, refine_key_frames, get_seconds
+from key_frame_extractor import get_candidate_scenes, refine_with_efficientnet, get_policy_thresholds, feature_extractor, format_timestamp, get_seconds
 from captions_generator import get_image_caption
 from vector_embeddings import get_text_embedding
 from store_embeddings import VideoDB
@@ -58,27 +58,37 @@ with st.sidebar:
                     tfile.write(video_bytes)
                     tpath = tfile.name
 
+                # Getting Video Metadata
+                cap = cv2.VideoCapture(tpath)
+                fps = cap.get(cv2.CAP_PROP_FPS)
+                total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                duration_sec = total_frames / fps
+                cap.release()
+
+                hist_t, cnn_t, minlen = get_policy_thresholds(duration_sec)
+
 
                 # PIPELINE EXECUTION
-                dq_frames, dq_indices, fps = extract_distinct_frames(tpath)
+                # Phase 1: Get Candidates (Histogram + Time)
+                candidates, fps = get_candidate_scenes(tpath, hist_t, minlen)
                 
-                if dq_frames:
-                    deep_feats = extract_deep_features(dq_frames)
-                    final_frames, final_indices, final_timestamps = refine_key_frames(dq_frames, dq_indices, deep_feats, fps)
+                
+                if candidates:
+                    final_scenes = refine_with_efficientnet(candidates, cnn_t, feature_extractor)
                     
                     # Store mapping of frame_id to image in memory (Qdrant doesn't store raw images well)
                     st.session_state.image_cache = {}
                     
-                    for i in range(len(final_frames)):
-                        rgb_frame = cv2.cvtColor(final_frames[i], cv2.COLOR_BGR2RGB)
+                    for i, scene in enumerate(final_scenes):
+                        rgb_frame = cv2.cvtColor(scene['frame'], cv2.COLOR_BGR2RGB)
                         caption = get_image_caption(rgb_frame)
                         vector = get_text_embedding(caption)
-                        print(final_timestamps)
 
-                        frame_id = int(final_indices[i])
+                        frame_id = scene['index']
+                        timestamp_str = format_timestamp(frame_id, fps)
                         db.upload_frame_data(
                             frame_idx=frame_id,
-                            timestamp=final_timestamps[i],
+                            timestamp=timestamp_str,
                             caption = caption,
                             vector = vector
                         )
@@ -86,7 +96,7 @@ with st.sidebar:
                         st.session_state.image_cache[frame_id] = rgb_frame
                     
                     
-                    st.sidebar.success(f"Processed {len(final_frames)} Key Scenes!")
+                    st.sidebar.success(f"Processed {len(final_scenes)} Key Scenes!")
                 
                 os.remove(tpath)
 
@@ -95,9 +105,10 @@ st.title("Video Intelligence Dashboard")
 
 if st.session_state.active_video:
     st.markdown('<div class="ui-frame">', unsafe_allow_html=True)
-    current_start = st.session_state.get("video_start_time", 0.0)
+    current_start = st.session_state.get("video_start_time", 82.959)
     st.video(st.session_state.active_video, 
-             start_time=float(current_start),
+             start_time=82.959,
+            
              )
     st.markdown('</div>', unsafe_allow_html=True)
 else:
@@ -130,7 +141,7 @@ if prompt := st.chat_input("Ask about a scene in the video..."):
             caption = hit.payload['caption']
 
             start_seconds = get_seconds(timestamp_str)
-            print(type(start_seconds))
+            print(start_seconds)
 
             res_text = f"Found at {timestamp_str}: {caption}"
             st.write(res_text)

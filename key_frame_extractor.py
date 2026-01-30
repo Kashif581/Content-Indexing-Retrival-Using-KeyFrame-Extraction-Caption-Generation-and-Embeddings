@@ -2,16 +2,21 @@ import cv2
 import numpy as np
 import os
 import tempfile
-from tensorflow.keras.applications.resnet50 import ResNet50, preprocess_input
+from tensorflow.keras.applications.efficientnet import EfficientNetB7, preprocess_input
 from tensorflow.keras.models import Model
 from sklearn.metrics.pairwise import cosine_similarity
 
 
-# Initialize model once at the module level to avoid reloading it
-base_model = ResNet50(weights='imagenet', include_top=False, pooling='avg')
-feature_extractor = Model(inputs=base_model.input, outputs=base_model.output)
 
+import streamlit as st
 
+@st.cache_resource
+def load_feature_model():
+    base_model = EfficientNetB7(weights='imagenet', include_top=False, pooling='avg')
+    return Model(inputs=base_model.input, outputs=base_model.output)
+
+feature_extractor = load_feature_model()
+# Formatting Time
 def format_timestamp(frame_index, fps):
     total_seconds = frame_index / fps
     hours= int(total_seconds // 3600)
@@ -20,6 +25,7 @@ def format_timestamp(frame_index, fps):
     milliseconds = int((total_seconds % 1) * 1000)
     return f"{hours:02d}:{minutes:02d}:{seconds:02d}.{milliseconds:03d}"
 
+# Converting time into seconds
 def get_seconds(time_str):
     """Converts '00:00:42.159' to 42.159 float seconds"""
     try:
@@ -29,68 +35,91 @@ def get_seconds(time_str):
     except Exception:
         return 0.0
 
+# comparing histogram of two frames
 def get_bhattacharyya_distance(hist1, hist2):
     return cv2.compareHist(hist1, hist2, cv2.HISTCMP_BHATTACHARYYA)
 
+# 
+def get_policy_thresholds(duration_sec):
+    """
+    Direct implementation of the Paper's Decision Policy.
+    Returns: (histogram_threshold, cnn_similarity_threshold, min_scene_length)
+    """
+    if duration_sec < 1800:   # < 30 mins: ADAPTIVE
+        return 0.12, 0.96, 12 
+    elif duration_sec < 7200: # 30-120 mins: FALLBACK
+        return 0.18, 0.98, 15 
+    else:                     # > 120 mins: CONTENT/REGULAR
+        return 0.25, 0.99, 15
+    
 
-def extract_distinct_frames(video_path, histogram_threshold=0.15):
+# --- PHASE 1: FAST HISTOGRAM FILTERING ---
+def get_candidate_scenes(video_path, hist_t, minlen):
+    """
+    Scans the video and finds candidate frames based on color changes.
+    Implements the 'Boundary Prediction' logic.
+    """
     cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened():
-        return [], [], 0
-
     fps = cap.get(cv2.CAP_PROP_FPS)
-    dq_k_frames, frame_indices = [], []
-    prev_frame_hist = None
-    frame_count = 0
+    
+    candidates = []
+    prev_hist = None
+    last_boundary_time = -minlen
+    count = 0
+    sample_interval = max(1, int(fps / 2)) # Sample at 2FPS for speed.
 
     while cap.isOpened():
         ret, frame = cap.read()
         if not ret: break
 
-        hsv_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-        hist = cv2.calcHist([hsv_frame], [0, 1, 2], None, [8, 8, 8], [0, 180, 0, 256, 0, 256])
-        hist = cv2.normalize(hist, hist).flatten()
+        if count % sample_interval == 0:
+            current_time = count / fps
+            hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+            hist = cv2.calcHist([hsv], [0, 1, 2], None, [8, 8, 8], [0, 180, 0, 256, 0, 256])
+            hist = cv2.normalize(hist, hist).flatten()
 
-        if prev_frame_hist is None:
-            dq_k_frames.append(frame)
-            frame_indices.append(frame_count)
-        else:
-            Sm = get_bhattacharyya_distance(prev_frame_hist, hist)
-            if Sm > histogram_threshold:
-                dq_k_frames.append(frame)
-                frame_indices.append(frame_count)
-
-        prev_frame_hist = hist
-        frame_count += 1
-
+            if prev_hist is not None:
+                dist = cv2.compareHist(prev_hist, hist, cv2.HISTCMP_BHATTACHARYYA)
+                # Apply paper constraints: change > threshold AND duration > minlen [cite: 35, 111]
+                if dist > hist_t and (current_time - last_boundary_time) >= minlen:
+                    candidates.append({"frame": frame, "index": count, "time": current_time})
+                    last_boundary_time = current_time
+            else:
+                # Always add the first frame [cite: 31]
+                candidates.append({"frame": frame, "index": count, "time": current_time})
+            
+            prev_hist = hist
+        count += 1
     cap.release()
-    return dq_k_frames, frame_indices, fps
+    return candidates, fps
 
 
-def extract_deep_features(frame_list):
-    features = []
-    for frame in frame_list:
-        img = cv2.resize(frame, (224, 224))
-        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        img = np.expand_dims(img, axis=0)
-        img = preprocess_input(img)
-        feature_vector = feature_extractor.predict(img, verbose=0)
-        features.append(feature_vector.flatten())
-    return np.array(features)
+# --- PHASE 2: DEEP SEMANTIC REFINEMENT ---
+def refine_with_efficientnet(candidates, cnn_t, model):
+    """
+    Uses EfficientNetB7 to filter out candidates that are visually 
+    similar but had different histograms (e.g., lighting shifts)[cite: 33, 59].
+    """
+    if not candidates: return []
+
+    # Batch process frames at 600x600 for B7 accuracy
+    imgs = [preprocess_input(cv2.resize(c['frame'], (600, 600))) for c in candidates]
+    imgs_array = np.array(imgs)
+    features = model.predict(imgs_array, batch_size = 8, verbose=0)
+
+    refined = [candidates[0]] # Always keep first candidate
+    last_feat = features[0].reshape(1, -1)
+
+    for i in range(1, len(features)):
+        curr_feat = features[i].reshape(1, -1)
+        sim = cosine_similarity(last_feat, curr_feat)[0][0]
+
+        if sim < cnn_t: # If not semantically similar, it's a new scene [cite: 31, 35]
+            refined.append(candidates[i])
+            last_feat = curr_feat
+    print(refined)    
+    return refined
 
 
-def refine_key_frames(dq_k_frames, frame_indices, feature_vectors, fps, similarity_threshold=0.98):
-    if not dq_k_frames: return [], [], []
-    final_key_frames, final_indices, final_timestamps = [dq_k_frames[0]], [frame_indices[0]], [format_timestamp(frame_indices[0], fps)]
-    last_key_frame_feature = feature_vectors[0].reshape(1, -1)
 
-    for i in range(1, len(dq_k_frames)):
-        current_frame_feature = feature_vectors[i].reshape(1, -1)
-        similarity = cosine_similarity(last_key_frame_feature, current_frame_feature)[0][0]
-        if similarity < similarity_threshold:
-            final_key_frames.append(dq_k_frames[i])
-            final_indices.append(frame_indices[i])
 
-            final_timestamps.append(format_timestamp(frame_indices[i], fps))
-            last_key_frame_feature = current_frame_feature
-    return final_key_frames, final_indices, final_timestamps
