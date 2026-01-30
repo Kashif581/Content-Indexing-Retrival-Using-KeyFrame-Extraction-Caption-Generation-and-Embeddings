@@ -7,7 +7,7 @@ class VideoDB:
         # Use ":memory:" for testing, or a local path for persistence
         self.client = QdrantClient(
             url="https://b533a87c-bd1f-47a5-b4a2-4ebba2c54a6f.europe-west3-0.gcp.cloud.qdrant.io:6333",
-            api_key="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhY2Nlc3MiOiJtIn0.5QwexKFb0mdlO_hog4oPkDx3YYTbzCt7q4H-PNTVNCg",
+            api_key="",
             timeout=120
         ) 
         self.collection_name = collection_name
