@@ -5,11 +5,15 @@ import os
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 
-# Import your custom modules
+# Import custom modules
 from key_frame_extractor import get_candidate_scenes, refine_with_efficientnet, get_policy_thresholds, feature_extractor, format_timestamp, get_seconds
 from captions_generator import get_image_caption
-from vector_embeddings import get_text_embedding
+from sklearn.preprocessing import normalize
+from vector_embeddings import load_dense_model, get_tfidf_vectorizer, get_sparse_batch, search_with_prf
 from store_embeddings import VideoDB
+
+import base64
+import streamlit.components.v1 as components
 
 st.set_page_config(layout="wide", page_title="VideoAI Insight", initial_sidebar_state="expanded")
 
@@ -36,7 +40,8 @@ if "active_video" not in st.session_state:
     st.session_state.active_video = None
 if "messages" not in st.session_state:
     st.session_state.messages = []
-
+if "tfidf_vectorizer" not in st.session_state:
+    st.session_state.tfidf_vectorizer = None
 db = VideoDB()
 
 # --- 3. Sidebar Configuration ---
@@ -58,6 +63,9 @@ with st.sidebar:
                     tfile.write(video_bytes)
                     tpath = tfile.name
 
+
+                # -------------------------- KeyFrame Extractions -------------------------------------
+
                 # Getting Video Metadata
                 cap = cv2.VideoCapture(tpath)
                 fps = cap.get(cv2.CAP_PROP_FPS)
@@ -75,25 +83,54 @@ with st.sidebar:
                 
                 if candidates:
                     final_scenes = refine_with_efficientnet(candidates, cnn_t, feature_extractor)
+
+                    all_captions = []
+                    frame_indices = []
+                    timestamps = []
+    
                     
-                    # Store mapping of frame_id to image in memory (Qdrant doesn't store raw images well)
+                    # Store mapping of frame_id to image in memory
                     st.session_state.image_cache = {}
-                    
+                    # ------------------------- Captions Generation -----------------------------------
+                    caption_progress = st.progress(0)
                     for i, scene in enumerate(final_scenes):
                         rgb_frame = cv2.cvtColor(scene['frame'], cv2.COLOR_BGR2RGB)
                         caption = get_image_caption(rgb_frame)
-                        vector = get_text_embedding(caption)
 
+                        all_captions.append(caption)
                         frame_id = scene['index']
-                        timestamp_str = format_timestamp(frame_id, fps)
-                        db.upload_frame_data(
-                            frame_idx=frame_id,
-                            timestamp=timestamp_str,
-                            caption = caption,
-                            vector = vector
-                        )
-                        # Keep image in session state to show in chat later
+                        frame_indices.append(frame_id)
+
+                        t_str = format_timestamp(frame_id, fps)
+                        timestamps.append(get_seconds(t_str)) # Store as double for Milvus
+
                         st.session_state.image_cache[frame_id] = rgb_frame
+                        caption_progress.progress((i + 1) / len(final_scenes))
+
+                    # Dense Vectors (E5-small-v2) - Note the 'passage: ' prefix
+                    dense_model = load_dense_model()
+                    docs_prefixed = [f"passage: {c}" for c in all_captions]
+                    dense_vectors = dense_model.encode(docs_prefixed, normalize_embeddings=True)
+
+                    # Sparse Vectors (TF-IDF)
+                    # We fit the vectorizer on the current video's context
+                    tfidf_vectorizer = get_tfidf_vectorizer(all_captions)
+                    st.session_state.tfidf_vectorizer = tfidf_vectorizer
+                    sparse_vectors = get_sparse_batch(tfidf_vectorizer, all_captions)
+                    sparse_matrix = tfidf_vectorizer.transform(all_captions)
+                    # sparse_vectors = sparse_matrix.toarray().astype("float32")
+                    # Normalize sparse vectors for Cosine Similarity
+                    sparse_vectors = normalize(sparse_vectors, norm='l2', axis=1)
+
+                    # 3. BATCH UPLOAD TO MILVUS
+                    st.info("Indexing to Milvus Cloud...")
+                    db.insert_batch(
+                        frame_indices=frame_indices,
+                        timestamps=timestamps,
+                        captions=all_captions,
+                        dense_vecs=dense_vectors,
+                        sparse_vecs=sparse_vectors
+                    )
                     
                     
                     st.sidebar.success(f"Processed {len(final_scenes)} Key Scenes!")
@@ -104,15 +141,17 @@ with st.sidebar:
 st.title("Video Intelligence Dashboard")
 
 if st.session_state.active_video:
+    video_base64 = base64.b64encode(st.session_state.active_video).decode()
     st.markdown('<div class="ui-frame">', unsafe_allow_html=True)
-    current_start = st.session_state.get("video_start_time", 82.959)
-    st.video(st.session_state.active_video, 
-             start_time=82.959,
-            
-             )
+    video_html = f"""
+        <video id="myVideo" width="100%" controls>
+            <source src="data:video/mp4;base64,{video_base64}" type="video/mp4">
+        </video>
+    """
+    st.markdown(video_html, unsafe_allow_html=True)
     st.markdown('</div>', unsafe_allow_html=True)
 else:
-    st.info("Upload and process a video from the sidebar to start chatting.")
+    st.info("Upload and process a video to start.")
 
 st.divider()
 
@@ -131,37 +170,41 @@ if prompt := st.chat_input("Ask about a scene in the video..."):
 
     # Assistant Logic
     with st.chat_message("assistant"):
-        query_vec = get_text_embedding(prompt)
-        results = db.search_video(query_vec, limit=1)
-        print(results.points[0])
-        if results.points[0]:
-            hit = results.points[0]
-            frame_id = hit.payload['frame_index']
-            timestamp_str = hit.payload['timestamp']
-            caption = hit.payload['caption']
-
-            start_seconds = get_seconds(timestamp_str)
-            print(start_seconds)
-
-            res_text = f"Found at {timestamp_str}: {caption}"
-            st.write(res_text)
+        if st.session_state.tfidf_vectorizer is not None:
+            # if "tfidf_vectorizer" in st.session_state:
+            resutls = search_with_prf(
+                    db, 
+                    prompt, 
+                    st.session_state.tfidf_vectorizer, 
+                    load_dense_model()
+                    )
 
 
-            # ADD THE JUMP BUTTON HERE
-            if st.button(f"Play from {timestamp_str}"):
-                st.session_state.video_start_time = start_seconds
-                st.rerun()
+            if resutls:
+                hit = resutls[0]
+                caption = hit.entity.get('caption')
+                timestamp = hit.entity.get('timestamp')
+                frame_id = hit.entity.get('frame_index')
+                # if "image_cache" in st.session_state and frame_id in st.session_state.image_cache:
+                #         st.image(st.session_state.image_cache[frame_id], width=400)
+                res_text = f"I found this at {timestamp}s: {caption}"
+                st.write(res_text)
 
-            #Retrieve image from our local cache using the ID from Qdrant
-            if "image_cache" in st.session_state and frame_id in st.session_state.image_cache:
-                matched_img = st.session_state.image_cache[frame_id]
-                st.image(matched_img)
+                # Show match image
+                if frame_id in st.session_state.get("image_cache", {}):
+                        matched_img = st.session_state.image_cache[frame_id]
+                        st.image(matched_img, width=400)
+
+                    # JavaScript Jump Logic
+                js_trigger = f"""
+                    <script>
+                        var v = window.parent.document.getElementById('myVideo');
+                        if(v) {{ v.currentTime = {timestamp}; v.play(); }}
+                    </script>
+                    """
+                components.html(js_trigger, height=0)
+
+                st.session_state.messages.append({"role": "assistant", "content": res_text, "image": matched_img})
+            else:
+                st.write("No matching scenes found.")
                 
-                st.session_state.messages.append({
-                    "role": "assistant", "content": res_text, 
-                    "image": matched_img, "img_caption": f"Scene at {timestamp_str}"
-                })
-        else:
-            res_text = "I couldn't find a matching scene in the database."
-            st.write(res_text)
-            st.session_state.messages.append({"role": "assistant", "content": res_text})

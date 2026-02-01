@@ -1,53 +1,53 @@
-from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, VectorParams, PointStruct
+from pymilvus import connections, utility, Collection, CollectionSchema, FieldSchema, DataType
 import streamlit as st
+import numpy as np
 
 class VideoDB:
-    def __init__(self, collection_name="video_scenes"):
-        # Use ":memory:" for testing, or a local path for persistence
-        self.client = QdrantClient(
-            url="https://b533a87c-bd1f-47a5-b4a2-4ebba2c54a6f.europe-west3-0.gcp.cloud.qdrant.io:6333",
-            api_key="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhY2Nlc3MiOiJtIn0.5QwexKFb0mdlO_hog4oPkDx3YYTbzCt7q4H-PNTVNCg",
-            timeout=120
-        ) 
+    def __init__(self, collection_name="video_hybrid_search"):
         self.collection_name = collection_name
+        self.connect()
         self._setup_collection()
 
+    def connect(self):
+        """Connects to Zilliz/Milvus Cloud using Streamlit secrets."""
+        connections.connect(
+            alias="default",
+            uri="",
+            token=""
+        )
+
     def _setup_collection(self):
-        """Creates the collection if it doesn't exist."""
-        collections = self.client.get_collections().collections
-        exists = any(c.name == self.collection_name for c in collections)
-        
-        if not exists:
-            # We use 384 dimensions for 'all-MiniLM-L6-v2'
-            self.client.create_collection(
-                collection_name=self.collection_name,
-                vectors_config=VectorParams(size=384, distance=Distance.COSINE),
-            )
+        """Defines the hybrid schema: Dense (384) + Sparse (5000)."""
+        if utility.has_collection(self.collection_name):
+            self.collection = Collection(self.collection_name)
+            return
 
-    def upload_frame_data(self, frame_idx, timestamp, caption, vector):
-        """
-        Stores frame metadata and vector into Qdrant.
-        """
-        self.client.upsert(
-            collection_name=self.collection_name,
-            points=[
-                PointStruct(
-                    id=frame_idx,  # Use frame index as unique ID
-                    vector=vector.tolist(),
-                    payload={
-                        "timestamp": timestamp,
-                        "caption": caption,
-                        "frame_index": frame_idx
-                    }
-                )
-            ]
-        )
+        fields = [
+            FieldSchema(name="id", dtype=DataType.INT64, is_primary=True, auto_id=True),
+            FieldSchema(name="frame_index", dtype=DataType.INT64),
+            FieldSchema(name="timestamp", dtype=DataType.DOUBLE),
+            FieldSchema(name="caption", dtype=DataType.VARCHAR, max_length=500),
+            FieldSchema(name="dense_vector", dtype=DataType.FLOAT_VECTOR, dim=384),
+            FieldSchema(name="sparse_vector", dtype=DataType.FLOAT_VECTOR, dim=5000)
+        ]
 
-    def search_video(self, query_vector, limit=3):
-        """Searches the DB for the most relevant frames."""
-        return self.client.query_points(
-            collection_name=self.collection_name,
-            query=query_vector.tolist(),
-            limit=limit
-        )
+        schema = CollectionSchema(fields=fields, description="Video Hybrid Search")
+        self.collection = Collection(name=self.collection_name, schema=schema)
+
+        # Create IVF_FLAT indexes for both vectors
+        index_params = {"metric_type": "COSINE", "index_type": "IVF_FLAT", "params": {"nlist": 128}}
+        self.collection.create_index(field_name="dense_vector", index_params=index_params)
+        self.collection.create_index(field_name="sparse_vector", index_params=index_params)
+        self.collection.load()
+
+    def insert_batch(self, frame_indices, timestamps, captions, dense_vecs, sparse_vecs):
+        """Inserts processed video data in batches."""
+        data = [
+            frame_indices,
+            timestamps,
+            captions,
+            dense_vecs.tolist(),
+            sparse_vecs.tolist()
+        ]
+        self.collection.insert(data)
+        self.collection.flush()
