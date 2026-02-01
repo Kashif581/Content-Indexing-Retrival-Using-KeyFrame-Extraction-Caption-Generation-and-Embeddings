@@ -1,29 +1,57 @@
-import torch
-from transformers import BlipProcessor, BlipForConditionalGeneration
-from PIL import Image
+import cv2
+import base64
 import streamlit as st
+from ollama import Client
 
 @st.cache_resource
-def load_fusecap():
-    """Initializes the FuseCap model and processor."""
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    model_id = "noamrot/FuseCap" 
-    processor = BlipProcessor.from_pretrained(model_id)
-    model = BlipForConditionalGeneration.from_pretrained(model_id).to(device)
-    return processor, model, device
+def get_ollama_client():
+    """Initializes the Ollama client."""
+    # Replace with your actual Ollama host if different
+    return Client(
+        host="https://ollama.com",
+        headers={
+            "Authorization": "Bearer <API_KEY>"
+        }
+    )
 
 def get_image_caption(frame_np):
-    """Generates a dense caption for a given numpy image."""
-    processor, model, device = load_fusecap()
+    """
+    Generates a dense caption using Gemma 3:27b-cloud.
+    Accepts a numpy array (RGB) from the video pipeline.
+    """
+    client = get_ollama_client()
     
-    # Pre-process the image
-    raw_image = Image.fromarray(frame_np)
-    inputs = processor(images=raw_image, return_tensors="pt").to(device)
+    # 1. Convert Numpy (RGB) to BGR for OpenCV encoding
+    # (Only needed if your input is RGB, which it is in your current app.py loop)
+    bgr_frame = cv2.cvtColor(frame_np, cv2.COLOR_RGB2BGR)
     
-    # Generate tokens
-    with torch.no_grad():
-        out = model.generate(**inputs, max_new_tokens=50)
+    # 2. Encode image to memory buffer as JPEG
+    _, buffer = cv2.imencode('.jpg', bgr_frame)
     
-    caption = processor.decode(out[0], skip_special_tokens=True)
-    print(caption)
-    return caption
+    # 3. Convert buffer to Base64 string
+    img_base64 = base64.b64encode(buffer).decode('utf-8')
+
+    prompt = """You are an image captioning model. Generate one caption that:
+    - Describes only what is clearly visible
+    - Uses simple, literal language
+    - Follows present tense
+    - Mentions main subject, action, and setting
+    - Is 12-20 words long and ends with a period."""
+
+    try:
+        response = client.chat(
+            model="gemma3:27b-cloud",
+            messages=[
+                {
+                    "role": "user",
+                    "content": prompt,
+                    "images": [img_base64]
+                }
+            ]
+        )
+        caption = response["message"]["content"].strip()
+        print(f"Gemma Caption: {caption}")
+        return caption
+    except Exception as e:
+        st.error(f"Ollama API Error: {e}")
+        return "Caption generation failed."
