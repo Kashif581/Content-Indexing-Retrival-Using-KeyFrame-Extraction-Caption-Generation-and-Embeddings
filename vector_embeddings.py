@@ -94,9 +94,9 @@ def search_with_prf(db, query_text, tfidf_vectorizer, dense_model, top_k=3):
     # This balances the importance of the dense and sparse results
     res = db.collection.hybrid_search(
         [req_dense, req_sparse], 
-        ranker=RRFRanker(), 
+        rerank=RRFRanker(),
         limit=top_k,
-        output_fields=["timestamp", "caption", "frame_index"]
+        output_fields=["timestamp", "caption", "frame_index"],
     )
     
     return res[0] # Returns a list of hits
