@@ -10,7 +10,7 @@ def get_ollama_client():
     return Client(
         host="https://ollama.com",
         headers={
-            "Authorization": "Bearer <API-KEY>"
+            "Authorization": "Bearer a96e2b8b2e88434c9f18de82946f46eb.qMrDL0mQPu5IxVRHukinHe2I"
         }
     )
 
