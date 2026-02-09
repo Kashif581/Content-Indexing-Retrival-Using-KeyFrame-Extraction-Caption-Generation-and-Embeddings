@@ -12,8 +12,8 @@ class VideoDB:
         """Connects to Zilliz/Milvus Cloud using Streamlit secrets."""
         connections.connect(
             alias="default",
-            uri="https://in03-34dd51e908e5f0a.serverless.aws-eu-central-1.cloud.zilliz.com",
-            token="593375de4ee83028c9ccc94016f5dce25203efac93577ce49dff6254ddb47ab2989530fa856eaee87ef5e985579ed7c5c6d38677"
+            uri="",
+            token=""
         )
 
     def _setup_collection(self):
