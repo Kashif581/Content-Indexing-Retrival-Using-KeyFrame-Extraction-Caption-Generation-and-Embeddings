@@ -9,7 +9,10 @@ from sklearn.metrics.pairwise import cosine_similarity
 from key_frame_extractor import get_candidate_scenes, refine_with_efficientnet, get_policy_thresholds, feature_extractor, format_timestamp, get_seconds
 from captions_generator import get_image_caption
 from sklearn.preprocessing import normalize
-from vector_embeddings import load_dense_model, get_tfidf_vectorizer, get_sparse_batch, search_with_prf
+# OLD CODE:
+# from vector_embeddings import load_dense_model, get_tfidf_vectorizer, get_sparse_batch, hybrid_search_with_rrf
+# NEW CODE:
+from vector_embeddings import load_dense_model, get_tfidf_vectorizer, get_sparse_batch, search_with_prf, build_vocab_matrix
 from store_embeddings import VideoDB
 
 import base64
@@ -116,6 +119,13 @@ with st.sidebar:
                     # We fit the vectorizer on the current video's context
                     tfidf_vectorizer = get_tfidf_vectorizer(all_captions)
                     st.session_state.tfidf_vectorizer = tfidf_vectorizer
+
+                    # Stage 3: build vocabulary embedding matrix once at processing time
+                    st.info("Building vocabulary matrix for query expansion...")
+                    filtered_terms, vocab_matrix = build_vocab_matrix(tfidf_vectorizer, dense_model)
+                    st.session_state.filtered_terms = filtered_terms
+                    st.session_state.vocab_matrix = vocab_matrix
+
                     sparse_vectors = get_sparse_batch(tfidf_vectorizer, all_captions)
                     sparse_matrix = tfidf_vectorizer.transform(all_captions)
                     # sparse_vectors = sparse_matrix.toarray().astype("float32")
@@ -172,16 +182,26 @@ if prompt := st.chat_input("Ask about a scene in the video..."):
     with st.chat_message("assistant"):
         if st.session_state.tfidf_vectorizer is not None:
             # if "tfidf_vectorizer" in st.session_state:
-            resutls = search_with_prf(
-                    db, 
-                    prompt, 
-                    st.session_state.tfidf_vectorizer, 
-                    load_dense_model()
-                    )
+            # OLD CODE:
+            # resutls = hybrid_search_with_rrf(
+            #         db,
+            #         prompt,
+            #         st.session_state.tfidf_vectorizer,
+            #         load_dense_model()
+            #         )
+            # NEW CODE:
+            results = search_with_prf(
+                db,
+                prompt,
+                st.session_state.tfidf_vectorizer,
+                load_dense_model(),
+                filtered_terms=st.session_state.get("filtered_terms", []),
+                vocab_matrix=st.session_state.get("vocab_matrix", np.array([])),
+            )
 
 
-            if resutls:
-                hit = resutls[0]
+            if results:
+                hit = results[0]
                 caption = hit.entity.get('caption')
                 timestamp = hit.entity.get('timestamp')
                 frame_id = hit.entity.get('frame_index')
